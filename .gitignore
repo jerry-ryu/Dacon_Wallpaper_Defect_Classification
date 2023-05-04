@@ -5,6 +5,7 @@
 /notebook/
 /experiment/
 /__pycache__/
+/wandb/
 
 # file
 Baseyaml.yaml
