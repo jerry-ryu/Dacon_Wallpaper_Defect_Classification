@@ -1,4 +1,4 @@
-# import
+import argparse
 import random
 import pandas as pd
 import numpy as np
@@ -21,13 +21,19 @@ from sklearn.metrics import f1_score
 from sklearn.metrics import classification_report
 from tqdm.auto import tqdm
 import yaml
+import wandb
 import warnings
 warnings.filterwarnings(action='ignore')
 
 device = torch.device('cuda' if torch.cuda.is_available() else torch.device('cpu'))
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--yaml_path', type=str, default = 'Baseyaml.yaml', help = 'yaml 파일 위치')
+    args = parser.parse_args()
+
 # yaml 파일 가져오기 및 실험 기본 설정
-with open('Baseyaml.yaml') as f:
+with open(args.yaml_path) as f:
     CFG = yaml.load(f, Loader=yaml.FullLoader)
 folder_path = createDirectory(os.path.join(CFG['ROOT_PATH'], CFG['NAME']))
 yalm_string = yaml.dump(CFG)
@@ -35,6 +41,12 @@ CFG['NAME'] = folder_path.split('/')[-1]
 with open(os.path.join(folder_path, CFG['NAME']+'.yaml'), 'w') as outfile:
     yaml.dump(CFG, outfile)
 
+# wandb 설정
+wandb.init(
+    project='jangpan',
+    name=CFG['NAME'],
+    config=CFG
+    )
 
 
 # 재현성
@@ -106,7 +118,8 @@ def train(model, optimizer, train_loader, val_loader, scheduler, device):
             _val_loss, _val_score = validation(model, criterion, val_loader, device)
             _train_loss = np.mean(train_loss)
             print(f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}] Val Loss : [{_val_loss:.5f}] Val Weighted F1 Score : [{_val_score:.5f}]')
-
+            wandb.log({"Train/Train Loss": _train_loss, "Val/Val Loss": _val_loss, "Val/Weighted F1 Score":_val_score}, step=epoch)
+            wandb.log({"lr": optimizer.param_groups[0]['lr'], "epoch": epoch}, step =epoch)
             if scheduler is not None:
                 scheduler.step(_val_score)
 
@@ -144,3 +157,4 @@ optimizer = create_optimizer(CFG['OPTIMIZER'], params = model.parameters(), lr =
 scheduler =  create_scheduler(CFG['SCHEDULER'], optimizer = optimizer)
 infer_model = train(model, optimizer, train_loader, val_loader, scheduler, device)
 torch.save(infer_model, os.path.join(folder_path,'model.pt'))
+wandb.finish()
