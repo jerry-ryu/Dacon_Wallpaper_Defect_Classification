@@ -2,3 +2,9 @@
 /data/
 /weight/
 /submit/
+/notebook/
+/experiment/
+/__pycache__/
+
+# file
+Baseyaml.yaml
