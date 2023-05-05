@@ -28,7 +28,6 @@ class_dict = {0: '가구수정', 1: '걸레받이수정', 2: '곰팡이', 3: '�
 # transform / dataset / dataloader 
 test = pd.read_csv('/home/elicer/Jangpan/data/test.csv')
 test['img_path'] = test['img_path'].apply(lambda x : os.path.join('/home/elicer/Jangpan/data',*x.split('/')[1:]))
-print(test['img_path'])
 test_transform = create_test_augmentation(CFG['TEST_AUGMENTATION'], resize = CFG['IMG_SIZE'])
 test_dataset = create_dataset(
     CFG['DATASET'],
