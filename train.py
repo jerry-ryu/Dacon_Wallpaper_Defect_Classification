@@ -13,12 +13,12 @@ from model import create_model
 from optimizer import create_optimizer
 from scheduler import create_scheduler
 from loss import create_criterion
+from metric import metric, plot_confusion_matrix
 from others import *
 
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
-from sklearn.metrics import f1_score
-from sklearn.metrics import classification_report
+from sklearn.metrics import f1_score,classification_report, confusion_matrix, accuracy_score
 from tqdm.auto import tqdm
 import yaml
 import wandb
@@ -48,7 +48,6 @@ wandb.init(
     config=CFG
     )
 
-
 # 재현성
 seed_everything(CFG['SEED'])
 seed_worker(CFG['SEED'])
@@ -65,7 +64,6 @@ train, val, _, _ = train_test_split(df, df['label'], test_size=0.3, stratify=df[
 le = preprocessing.LabelEncoder()
 train['label'] = le.fit_transform(train['label'])
 val['label'] = le.transform(val['label'])
-
 
 # transform / dataset / dataloader /sampler
 train_transform = create_train_augmentation(CFG['TRAIN_AUGMENTATION'], resize = CFG['IMG_SIZE'])
@@ -93,14 +91,17 @@ val_loader = DataLoader(val_dataset, batch_size = CFG['BATCH_SIZE'], shuffle = F
 #train/val
 def train(model, optimizer, train_loader, val_loader, scheduler, device):
     model.to(device)
-    criterion = create_criterion(CFG['LOSS']).to(device)
+    criterion = create_criterion(CFG['LOSS'], reduction="none").to(device)
 
     best_score = 0
     best_model = None
 
     for epoch in range(1, CFG['EPOCHS']+1):
         model.train()
-        train_loss = []
+        train_losses = []
+        train_predictions = []
+        train_labels = []
+        
         for imgs, labels in tqdm(iter(train_loader)):
             imgs = imgs.float().to(device)
             labels = labels.to(device)
@@ -108,31 +109,56 @@ def train(model, optimizer, train_loader, val_loader, scheduler, device):
             optimizer.zero_grad()
 
             output = model(imgs)
-            loss = criterion(output, labels)
-            loss.backward()
+            losses = criterion(output, labels)
+            losses.mean().backward()
             optimizer.step()
-
-            train_loss.append(loss.item())
+            
+            train_losses.append(losses.detach().cpu())
+            train_predictions.append(torch.argmax(output, dim=1))
+            train_labels.append(labels)
+        
+        train_predictions = torch.cat(train_predictions)
+        train_labels = torch.cat(train_labels)
+        train_losses = torch.cat(train_losses)
 
         if epoch % CFG['LOG_INTERVAL'] == 0 or epoch == CFG['EPOCHS']:
-            _val_loss, _val_score = validation(model, criterion, val_loader, device)
-            _train_loss = np.mean(train_loss)
-            print(f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}] Val Loss : [{_val_loss:.5f}] Val Weighted F1 Score : [{_val_score:.5f}]')
-            wandb.log({"Train/Train Loss": _train_loss, "Val/Val Loss": _val_loss, "Val/Weighted F1 Score":_val_score}, step=epoch)
+            train_metric = metric(train_losses, train_predictions, train_labels, len(le.classes_))
+            val_metric = validation(model, criterion, val_loader, device)
+
+            print(f'Epoch [{epoch}], Train Loss : [{train_metric["total_loss"]:.5f}] Val Loss : [{val_metric["total_loss"]:.5f}] Val Weighted F1 Score : [{val_metric["weighted_f1"]:.5f}]')
+            
+            label_dict = dict(zip(le.transform(le.classes_), le.classes_))
+            train_log_dict = {"Train/ Loss": train_metric["total_loss"], "Train/ ACC": train_metric["total_accuracy"],"Train/ Weighted F1 Score": train_metric["weighted_f1"]}
+            for index, label in label_dict.items():
+                train_log_dict[f"Train/ ({label}) Loss"] = train_metric["class_loss"][index]
+                train_log_dict[f"Train/ ({label}) ACC"] = train_metric["class_accuracy"][index]
+                train_log_dict[f"Train/ ({label}) F1 score"] = train_metric["class_f1"][index]
+            wandb.log(train_log_dict, step=epoch)
+
+            val_log_dict = {"Val/ Loss": val_metric["total_loss"], "Val/ ACC": val_metric["total_accuracy"],"Val/ Weighted F1 Score": val_metric["weighted_f1"]}
+            for index, label in label_dict.items():
+                val_log_dict[f"Val/ ({label}) Loss"] = val_metric["class_loss"][index]
+                val_log_dict[f"Val/ ({label}) ACC"] = val_metric["class_accuracy"][index]
+                val_log_dict[f"Val/ ({label}) F1 score"] = val_metric["class_f1"][index]
+            wandb.log(val_log_dict, step=epoch)
+
             wandb.log({"lr": optimizer.param_groups[0]['lr'], "epoch": epoch}, step =epoch)
             if scheduler is not None:
-                scheduler.step(_val_score)
+                scheduler.step(train_metric["weighted_f1"])
 
-            if best_score < _val_score:
-                best_score = _val_score
+            if best_score < train_metric["weighted_f1"]:
+                best_score = train_metric["weighted_f1"]
                 best_model = model
+                plot_confusion_matrix(val_metric["cmatrix"], folder_path)
+
 
     return best_model
 
 def validation(model, criterion, val_loader, device):
     model.eval()
-    val_loss = []
-    preds, true_labels = [], []
+    val_losses = []
+    val_predictions = []
+    val_labels = []
 
     with torch.no_grad():
         for imgs, labels in tqdm(iter(val_loader)):
@@ -142,14 +168,16 @@ def validation(model, criterion, val_loader, device):
             pred = model(imgs)
             loss = criterion(pred, labels)
 
-            preds += pred.argmax(1).detach().cpu().numpy().tolist()
-            true_labels += labels.detach().cpu().numpy().tolist()
+            val_losses.append(loss.detach().cpu())
+            val_predictions.append(torch.argmax(pred, dim=1))
+            val_labels.append(labels)
+            
+        val_predictions = torch.cat(val_predictions)
+        val_labels = torch.cat(val_labels)
+        val_losses = torch.cat(val_losses)
 
-            val_loss.append(loss.item())
-
-        _val_loss = np.mean(val_loss)
-        _val_score = f1_score(true_labels, preds, average = 'weighted')
-    return _val_loss, _val_score
+        val_metric = metric(val_losses, val_predictions, val_labels, len(le.classes_))
+    return val_metric
 
 
 model = create_model(CFG['MODEL'], num_classes=len(le.classes_))
